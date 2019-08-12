@@ -1,6 +1,6 @@
 pipeline {
   agent {
-    label "xenial-intel-device-plugins"
+    label "builder"
   }
   options {
     timeout(time: 2, unit: "HOURS")
@@ -58,7 +58,7 @@ pipeline {
         }
       }
     }
-    stage("make vet, lint, cyclomatic"){
+    stage("make vet, lint, cyclomatic") {
       parallel {
         stage("make lint") {
           steps {
@@ -138,6 +138,48 @@ pipeline {
         withDockerRegistry([credentialsId: "57e4a8b2-ccf9-4da1-a787-76dd1aac8fd1", url: "https://${CUSTOM_REGISTRY}"]) {
           dir(path: "$REPO_DIR") {
             sh "make push-all"
+          }
+        }
+      }
+    }
+    stage('Stash scripts') {
+      steps {
+        stash name: "scripts", includes: "scripts/**/*"
+      }
+    }
+    stage('K8s master && workers') {
+      agent {
+        label "clrvmk8s"
+      }
+      options {
+        skipDefaultCheckout()
+      }
+      stages {
+        stage('Get master node requirements') {
+          steps {
+            sh 'git clone https://github.com/clearlinux/cloud-native-setup.git'
+            sh 'git clone https://github.com/kubernetes-sigs/node-feature-discovery.git'
+            sh './cloud-native-setup/clr-k8s-examples/setup_system.sh'
+            sh './cloud-native-setup/clr-k8s-examples/create_stack.sh init'
+          }
+        }
+        stage('Configure master node') {
+          steps {
+            sh 'mkdir -p $HOME/.kube'
+            sh 'sudo cp -i /etc/kubernetes/admin.conf $HOME/.kube/config'
+            sh 'sudo chown $(id -u):$(id -g) $HOME/.kube/config'
+            sh './cloud-native-setup/clr-k8s-examples/create_stack.sh cni'
+            sh 'kubectl rollout status deployment/coredns -n kube-system --timeout=5m'
+            sh 'kubectl create -f ./node-feature-discovery/nfd-master.yaml.template'
+            sh 'kubectl apply -f ./node-feature-discovery/nfd-daemonset-combined.yaml.template'
+            sh 'kubectl rollout status daemonset/nfd -n node-feature-discovery --timeout=5m'
+            sh 'kubectl describe node'
+          }
+        }
+        stage('Expose config to workers') {
+          steps {
+            sh 'kubeadm token create --print-join-command | tee ./scripts/join.sh'
+            stash name: "scripts", includes: "scripts/**/*"
           }
         }
       }
